@@ -1,0 +1,114 @@
+name: GitGraph
+description: Generate a vertical Git history graph (SVG) and publish it to a dedicated branch.
+author: GitGraph contributors
+branding:
+  icon: git-branch
+  color: blue
+
+inputs:
+  config:
+    description: Path to a gitgraph.toml (default - gitgraph.toml in the repository if present).
+    required: false
+    default: ""
+  working-directory:
+    description: Repository directory.
+    required: false
+    default: "."
+  file-name:
+    description: Name of the generated SVG file on the artifact branch.
+    required: false
+    default: gitgraph.svg
+  json:
+    description: Also publish the JSON layout (true or false).
+    required: false
+    default: "false"
+  publish:
+    description: Push the generated files to the artifact branch (true or false).
+    required: false
+    default: "true"
+  branch:
+    description: Artifact branch. It is excluded from the graph automatically.
+    required: false
+    default: gitgraph-assets
+  commit-message:
+    description: Commit message used on the artifact branch.
+    required: false
+    default: "Update & Share Graph"
+  repository-url:
+    description: Repository URL used for commit/tag links inside the SVG (empty disables links).
+    required: false
+    default: ${{ github.server_url }}/${{ github.repository }}
+  unshallow:
+    description: Fetch full history first if the checkout is shallow (true or false).
+    required: false
+    default: "true"
+  python-version:
+    description: Python version used to run GitGraph.
+    required: false
+    default: "3.12"
+
+outputs:
+  svg-path:
+    description: Path of the generated SVG file.
+    value: ${{ steps.generate.outputs.svg-path }}
+  raw-url:
+    description: raw.githubusercontent.com URL of the published SVG (github.com public repositories).
+    value: ${{ steps.generate.outputs.raw-url }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install GitGraph
+      shell: bash
+      run: python -m pip install --disable-pip-version-check --quiet "$GITHUB_ACTION_PATH"
+
+    - name: Generate graph
+      id: generate
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GG_CONFIG: ${{ inputs.config }}
+        GG_FILE_NAME: ${{ inputs.file-name }}
+        GG_JSON: ${{ inputs.json }}
+        GG_BRANCH: ${{ inputs.branch }}
+        GG_REPOSITORY_URL: ${{ inputs.repository-url }}
+        GG_UNSHALLOW: ${{ inputs.unshallow }}
+        GG_REPOSITORY: ${{ github.repository }}
+        GG_SERVER_URL: ${{ github.server_url }}
+      run: |
+        set -euo pipefail
+        if [ "$GG_UNSHALLOW" = "true" ] && [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+          echo "Shallow checkout detected; fetching full history (prefer fetch-depth: 0)."
+          git fetch --quiet --unshallow --tags origin
+        fi
+        out_dir="${RUNNER_TEMP}/gitgraph"
+        mkdir -p "$out_dir"
+        args=(generate --repo . --output "${out_dir}/${GG_FILE_NAME}"
+              --exclude "$GG_BRANCH" --exclude "*/$GG_BRANCH")
+        if [ -n "$GG_CONFIG" ]; then args+=(--config "$GG_CONFIG"); fi
+        if [ -n "$GG_REPOSITORY_URL" ]; then args+=(--repository-url "$GG_REPOSITORY_URL"); fi
+        if [ "$GG_JSON" = "true" ]; then args+=(--json "${out_dir}/${GG_FILE_NAME%.svg}.json"); fi
+        python -m gitgraph "${args[@]}"
+        echo "svg-path=${out_dir}/${GG_FILE_NAME}" >> "$GITHUB_OUTPUT"
+        if [ "$GG_SERVER_URL" = "https://github.com" ]; then
+          echo "raw-url=https://raw.githubusercontent.com/${GG_REPOSITORY}/${GG_BRANCH}/${GG_FILE_NAME}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Publish to artifact branch
+      if: ${{ inputs.publish == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GITGRAPH_BRANCH: ${{ inputs.branch }}
+        GITGRAPH_MESSAGE: ${{ inputs.commit-message }}
+        GG_JSON: ${{ inputs.json }}
+        GG_SVG: ${{ steps.generate.outputs.svg-path }}
+      run: |
+        set -euo pipefail
+        files=("$GG_SVG")
+        if [ "$GG_JSON" = "true" ]; then files+=("${GG_SVG%.svg}.json"); fi
+        "$GITHUB_ACTION_PATH/action/publish-artifact-branch.sh" "${files[@]}"
